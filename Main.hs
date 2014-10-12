@@ -4,14 +4,17 @@ import Data.Text
 import Data.Conduit as C
 import Data.Conduit.List as CL
 import Control.Monad.IO.Class (liftIO)
-import Control.Lens ((^!), (^.), act)
+import Control.Monad.Trans.Resource
+import Control.Monad.Logger
 import Web.Twitter.Conduit
 import Web.Twitter.Types
 import Web.Authenticate.OAuth
-import Control.Monad.Logger
 import Security
 
-void :: Monad m =>m a -> m ()
+botName :: Text
+botName = "iquit_pubnow"
+
+void :: Monad m => m a -> m ()
 void m = m >>= const (return ())
 
 
@@ -24,23 +27,29 @@ twInfo = def
      , twProxy = Nothing
      }
 
-testmain = print =<< (runNoLoggingT $ runTW twInfo (call homeTimeline))
+runTwit :: TW (ResourceT (NoLoggingT IO)) a -> IO a
+runTwit = runNoLoggingT . runTW twInfo
 
-main = putStrLn welcome >> runBot pubLogic
+testmain :: IO [Status]
+testmain = runNoLoggingT $ runTW twInfo (call mentionsTimeline)
 
-runBot :: (StreamingAPI -> IO ()) -> IO ()
-runBot logic = runNoLoggingT . runTW twInfo $ do
+main = putStrLn welcome >> runTwit (runBot pubLogic)
+
+runBot :: (MonadResource m, MonadLogger m) => (StreamingAPI -> TW m ()) -> TW m ()
+runBot logic = do
     strm <- stream userstream
-    strm C.$$+- CL.mapM_ (^! act (liftIO . logic))
-    
+    strm C.$$+- CL.mapM_ logic
 
-pubLogic :: StreamingAPI -> IO ()
+pubLogic :: (MonadResource m, MonadLogger m) => StreamingAPI -> TW m ()
 pubLogic (SStatus s) = case isMent of
-                        True -> void $ runNoLoggingT $ runTW twInfo $ call $ update res
-                        False -> print $ userScreenName $ statusUser s
+                        True -> do 
+                            call $ update res
+                            liftIO $ putStrLn $ "I've tweeted at " ++ (unpack $ usr s)
+                        False -> liftIO $ print $ userScreenName $ statusUser s
     where isMent = proc s
-          res    = usr s `append` " Hey, this is the bot responding!"
+          res    = cons '@' $ usr s `append` " Hey, this is the bot responding!"
           usr    = userScreenName . statusUser
-pubLogic s           = print s
+pubLogic s           = liftIO $ print s
 
-proc s = True
+proc :: Status -> Bool
+proc s = maybe False (== botName) (statusInReplyToScreenName s)
